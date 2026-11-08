@@ -1,0 +1,45 @@
+# LibWrt 25.12-nss / Xiaomi AX3600 (stock layout) 编译配置种子
+# 用法: cp config.seed .config && make defconfig
+# 目标内核: 6.12.112 (target/linux/generic/kernel-6.12 定义)
+# 设备定义: target/linux/qualcommax/image/ipq807x.mk -> Device/xiaomi_ax3600-stock
+
+##### Target #####
+CONFIG_TARGET_qualcommax=y
+CONFIG_TARGET_qualcommax_ipq807x=y
+CONFIG_TARGET_ALL_PROFILES=n
+CONFIG_TARGET_PER_DEVICE_ROOTFS=n
+CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_xiaomi_ax3600-stock=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=n
+CONFIG_TARGET_ROOTFS_SQUASHFS=y
+
+##### 用户要求编进固件的三个软件 #####
+CONFIG_PACKAGE_adguardhome=y
+CONFIG_PACKAGE_luci-app-adguardhome=y
+CONFIG_PACKAGE_luci-i18n-adguardhome-zh-cn=y
+CONFIG_PACKAGE_smartdns=y
+CONFIG_PACKAGE_luci-app-smartdns=y
+CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=y
+CONFIG_PACKAGE_luci-theme-argon=y
+CONFIG_PACKAGE_luci-app-argon-config=y
+CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
+
+##### LuCI 中文 / 基础工具（保持与现网一致） #####
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+CONFIG_PACKAGE_default-settings-chn=y
+CONFIG_PACKAGE_bash=y
+CONFIG_PACKAGE_bind-dig=y
+CONFIG_PACKAGE_curl=y
+CONFIG_PACKAGE_ca-bundle=y
+CONFIG_PACKAGE_ip-full=y
+CONFIG_PACKAGE_ethtool=y
+CONFIG_PACKAGE_block-mount=y
+
+##### 可选：内核对齐后 WireGuard 终于能原生编译（默认关，要就取消注释）
+# CONFIG_PACKAGE_wireguard-tools=y
+# CONFIG_PACKAGE_kmod-wireguard=y
+# CONFIG_PACKAGE_luci-proto-wireguard=y
+
+##### 不要动：以下由 target 默认包集自动带入 #####
+# dnsmasq-full / firewall4 / odhcpd / hostapd-common / wpad-openssl /
+# 全部 kmod-qca-nss-* / kmod-ath11k-* / ipq-wifi-xiaomi_ax3600
