@@ -2,17 +2,32 @@
 # 用法: cp config.seed .config && make defconfig
 # 目标内核: 6.12.112 (target/linux/generic/kernel-6.12 定义)
 # 设备定义: target/linux/qualcommax/image/ipq807x.mk -> Device/xiaomi_ax3600-stock
+#
+# 2026-11-09 修订（重要）：第一次编译产物只有
+#   libwrt-qualcommax-ipq807x-aliyun_ap8220.manifest
+# 即编成了阿里云 AP8220。原因：误用 CONFIG_TARGET_DEVICE_* 符号。
+# 在 scripts/target-metadata.pl 里该符号属于 "Target Devices" 菜单，
+# 整个菜单 depends on TARGET_MULTI_PROFILE；未启用 MULTI_PROFILE 时
+# make defconfig 会静默丢弃它，Target Profile choice 于是回落到
+# 字母序第一个设备 aliyun_ap8220。正确写法是单选 profile 符号：
+#   CONFIG_TARGET_<target>_<subtarget>_DEVICE_<id>=y
+# （参考公开 ax3600.config：CONFIG_TARGET_qualcommax_ipq807x_DEVICE_xiaomi_ax3600=y）
 
-##### Target #####
+##### Target（关键：必须选对机型）#####
 CONFIG_TARGET_qualcommax=y
 CONFIG_TARGET_qualcommax_ipq807x=y
-CONFIG_TARGET_ALL_PROFILES=n
-CONFIG_TARGET_PER_DEVICE_ROOTFS=n
-CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_xiaomi_ax3600-stock=y
+CONFIG_TARGET_qualcommax_ipq807x_DEVICE_xiaomi_ax3600-stock=y
 CONFIG_TARGET_ROOTFS_INITRAMFS=n
 CONFIG_TARGET_ROOTFS_SQUASHFS=y
+# make defconfig 会自动把 CONFIG_TARGET_PROFILE 设为
+# "DEVICE_xiaomi_ax3600-stock"，不需要也不应该手写（无 prompt 的 string 符号）。
 
-##### 用户要求编进固件的三个软件 #####
+# 以下三行是第一次编译的错误写法，实际无效，故意注释留作教训：
+# CONFIG_TARGET_ALL_PROFILES=n
+# CONFIG_TARGET_PER_DEVICE_ROOTFS=n
+# CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_xiaomi_ax3600-stock=y
+
+##### 用户要求编进固件的三个软件（第一次编译 manifest 已验证全部生效）#####
 CONFIG_PACKAGE_adguardhome=y
 CONFIG_PACKAGE_luci-app-adguardhome=y
 CONFIG_PACKAGE_luci-i18n-adguardhome-zh-cn=y
@@ -23,7 +38,7 @@ CONFIG_PACKAGE_luci-theme-argon=y
 CONFIG_PACKAGE_luci-app-argon-config=y
 CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
 
-##### LuCI 中文 / 基础工具（保持与现网一致） #####
+##### LuCI 中文 / 基础工具（保持与现网一致）#####
 CONFIG_PACKAGE_luci=y
 CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
 CONFIG_PACKAGE_default-settings-chn=y
@@ -35,7 +50,58 @@ CONFIG_PACKAGE_ip-full=y
 CONFIG_PACKAGE_ethtool=y
 CONFIG_PACKAGE_block-mount=y
 
-##### 可选：内核对齐后 WireGuard 终于能原生编译（默认关，要就取消注释）
+##### 附加 kmod（2026-11-09 用户要求：把以后可能用到的编进固件）#####
+# 理由：SNAPSHOT 滚动源只保留最近几个内核版本的 kmods；
+# 之前 6.12.108 就是被「各镜像唯独缺这一版」坑到 kmod-wireguard 装不上。
+# 一次性编进 squashfs，以后不用受镜像存档影响。
+# 边界：只编网络类。AX3600 硬件没有 USB 口，USB / 存储 / 文件系统类
+# kmod 一个都不编；target 的 DEVICE_PACKAGES 也显式排除了
+# kmod-usb3 / kmod-usb-dwc3 / kmod-usb-dwc3-qcom / automount。
+# 无线 ath11k 与 NSS 硬件加速由 target 默认带入，不重复写。
+# 源码里不存在的包会被 make defconfig 静默丢弃，workflow 会打印 MISS 清单。
+
+# -- 隧道 / VPN --
+CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_kmod-ovpn-backports=y
+CONFIG_PACKAGE_kmod-gre=y
+CONFIG_PACKAGE_kmod-gre6=y
+CONFIG_PACKAGE_kmod-vxlan=y
+CONFIG_PACKAGE_kmod-geneve=y
+CONFIG_PACKAGE_kmod-l2tp=y
+CONFIG_PACKAGE_kmod-l2tp-eth=y
+CONFIG_PACKAGE_kmod-l2tp-ip=y
+CONFIG_PACKAGE_kmod-pptp=y
+CONFIG_PACKAGE_kmod-sit=y
+CONFIG_PACKAGE_kmod-ip6-tunnel=y
+CONFIG_PACKAGE_kmod-iptunnel4=y
+CONFIG_PACKAGE_kmod-iptunnel6=y
+CONFIG_PACKAGE_kmod-udptunnel4=y
+CONFIG_PACKAGE_kmod-udptunnel6=y
+
+# -- 虚拟网卡 / 桥接 / VLAN（单臂旁路由扩展用）--
+CONFIG_PACKAGE_kmod-veth=y
+CONFIG_PACKAGE_kmod-macvlan=y
+CONFIG_PACKAGE_kmod-bridge=y
+CONFIG_PACKAGE_kmod-bonding=y
+CONFIG_PACKAGE_kmod-dummy=y
+CONFIG_PACKAGE_kmod-8021q=y
+CONFIG_PACKAGE_kmod-ifb=y
+
+# -- nftables 扩展（fw4 原生，透明代理/分流会用到）--
+CONFIG_PACKAGE_kmod-nft-tproxy=y
+CONFIG_PACKAGE_kmod-nft-socket=y
+CONFIG_PACKAGE_kmod-nft-nat=y
+CONFIG_PACKAGE_kmod-nft-offload=y
+CONFIG_PACKAGE_kmod-nft-bridge=y
+
+# -- QoS / 队列 / 拥塞控制 --
+CONFIG_PACKAGE_kmod-sched-core=y
+CONFIG_PACKAGE_kmod-sched-cake=y
+CONFIG_PACKAGE_kmod-sched-fq_codel=y
+CONFIG_PACKAGE_kmod-sched-htb=y
+CONFIG_PACKAGE_kmod-tcp-bbr=y
+
+##### WireGuard：workflow 的 with_wireguard 默认勾，会追加这三行 #####
 # CONFIG_PACKAGE_wireguard-tools=y
 # CONFIG_PACKAGE_kmod-wireguard=y
 # CONFIG_PACKAGE_luci-proto-wireguard=y

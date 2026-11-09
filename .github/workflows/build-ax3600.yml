@@ -10,18 +10,21 @@ on:
       with_wireguard:
         description: "附带原生 WireGuard（内核对齐后才可编译）"
         type: boolean
-        default: false
+        default: true
 
 env:
   TZ: Asia/Shanghai
 
 jobs:
   build:
+    # 依赖清单含 libncurses5-dev 等 22.04 专用包，不能贸然切 24.04。
+    # 注意：ubuntu-22.04 自 2026-09-17 起进入弃用期，2027-04-17 彻底移除，
+    # 期间可能排队变慢；若该标签不可用，需同步改依赖清单后再切换。
     runs-on: ubuntu-22.04
     timeout-minutes: 350
     steps:
       - name: 取本仓库配置
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 释放 runner 磁盘（OpenWrt 编译至少需 25GB）
         run: |
@@ -31,7 +34,7 @@ jobs:
           sudo apt-get clean
           df -h
 
-      - name: 安装编译依赖（官方 README 清单）
+      - name: 安装编译依赖（官方 README 清单，Ubuntu 22.04 专用）
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -59,7 +62,23 @@ jobs:
         working-directory: libwrt
         run: ./scripts/feeds update -a && ./scripts/feeds install -a
 
-      - name: 写入 .config
+      - name: 校验目标包确实存在于 feeds（防止 defconfig 静默丢包）
+        working-directory: libwrt
+        run: |
+          miss=0
+          for p in adguardhome smartdns luci-theme-argon luci-app-argon-config \
+                   luci-app-adguardhome luci-app-smartdns; do
+            hit=$(find feeds package -maxdepth 5 -type d -name "$p" -print -quit 2>/dev/null)
+            if [ -n "$hit" ]; then
+              echo "OK   $p -> $hit"
+            else
+              echo "MISS $p"
+              miss=1
+            fi
+          done
+          [ "$miss" -eq 0 ] || { echo "::error::缺少上述包定义，请检查 feeds 分支后重试"; exit 1; }
+
+      - name: 写入 .config 并断言机型与必编包
         run: |
           cp "$GITHUB_WORKSPACE/config.seed" "$GITHUB_WORKSPACE/libwrt/.config"
           cd "$GITHUB_WORKSPACE/libwrt"
@@ -70,8 +89,34 @@ jobs:
               'CONFIG_PACKAGE_luci-proto-wireguard=y' >> .config
           fi
           make defconfig
-          echo "=== 关键配置复核 ==="
-          grep -E 'CONFIG_TARGET_DEVICE|CONFIG_PACKAGE_(adguardhome|smartdns|luci-theme-argon|luci-app-(adguardhome|smartdns|argon-config)|wireguard-tools|kmod-wireguard)=' .config || true
+          echo "=== 已选中的设备符号（必须只有 AX3600 stock）==="
+          grep -E '^CONFIG_TARGET.*DEVICE.*=y|^CONFIG_TARGET_PROFILE' .config || true
+          echo "=== 关键包复核 ==="
+          grep -E 'CONFIG_PACKAGE_(adguardhome|smartdns|luci-theme-argon|luci-app-(adguardhome|smartdns|argon-config)|wireguard-tools|kmod-wireguard)=' .config || true
+          echo "=== 断言 1：目标设备确实是 xiaomi_ax3600-stock ==="
+          if ! grep -Eq '^CONFIG_TARGET_qualcommax_ipq807x_DEVICE_xiaomi_ax3600[-_]stock=y' .config; then
+            echo "::error::目标设备符号未生效，会编成别的机型（第一次就栽在这里），立即终止"
+            echo ">>> 请把上面「已选中的设备符号」里的实际名字告诉我，改 config.seed 对应行即可"
+            exit 1
+          fi
+          echo "=== 断言 2：三个必编包确实进了 .config ==="
+          miss=0
+          for s in CONFIG_PACKAGE_adguardhome=y CONFIG_PACKAGE_smartdns=y \
+                   CONFIG_PACKAGE_luci-theme-argon=y; do
+            if grep -qx "$s" .config; then echo "OK   $s"; else echo "MISS $s"; miss=1; fi
+          done
+          [ "$miss" -eq 0 ] || { echo "::error::关键包未进入 .config，立即终止"; exit 1; }
+          echo "=== 附加 kmod 生效报告（MISS = 源码无此包或被 target 排除，已跳过，不影响编译）==="
+          grep -E '^CONFIG_PACKAGE_kmod-' "$GITHUB_WORKSPACE/config.seed" \
+            | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | while read -r p; do
+              if grep -qx "CONFIG_PACKAGE_$p=y" .config; then
+                echo "OK   $p"
+              else
+                echo "MISS $p"
+              fi
+            done
+          echo "=== 最终编入固件的全部 kmod ==="
+          grep -E '^CONFIG_PACKAGE_kmod-.*=y' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
 
       - name: 预置 argon 为默认主题
         run: |
@@ -88,17 +133,58 @@ jobs:
 
       - name: 编译固件
         working-directory: libwrt
-        run: make -j$(nproc) V=s
+        run: |
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "完整编译日志写入 build.log（V=s 日志可达数百 MB，不直出 Actions 日志）"
+          set +e
+          make -j$(nproc) V=s > "$LOG" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "=== 编译失败 (rc=$rc)，最后 300 行 ==="
+            tail -n 300 "$LOG"
+            exit "$rc"
+          fi
+          echo "=== 编译成功，最后 80 行 ==="
+          tail -n 80 "$LOG"
 
-      - name: 整理产物
+      - name: 压缩编译日志（成功/失败都保留）
+        if: always()
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
+            gzip -9 -c "$GITHUB_WORKSPACE/build.log" > "$GITHUB_WORKSPACE/build.log.gz"
+            ls -lh "$GITHUB_WORKSPACE/build.log.gz"
+          fi
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log.gz
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 整理产物并断言固件真的存在
         if: success()
         run: |
           mkdir -p "$GITHUB_WORKSPACE/out"
           B="$GITHUB_WORKSPACE/libwrt/bin/targets/qualcommax/ipq807x"
+          echo "=== bin/targets/qualcommax/ipq807x 内容 ==="
+          ls -lh "$B" | head -60
+          echo "=== 所有镜像文件 ==="
+          find "$B" -maxdepth 1 -type f \( -name '*.bin' -o -name '*.ubi' -o -name '*.manifest' \) \
+            -printf '%f (%s bytes)\n' | sort
+          FW=$(find "$B" -maxdepth 1 -type f \
+            -name '*xiaomi_ax3600-stock*squashfs-sysupgrade*.bin' -print -quit)
+          if [ -z "$FW" ]; then
+            echo "::error::没找到 xiaomi_ax3600-stock 的 sysupgrade.bin —— 机型不对或镜像未生成，拒绝产出空 artifact"
+            exit 1
+          fi
+          echo "FIRMWARE_OK: $FW"
           cp "$B"/*xiaomi_ax3600* "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
           cp "$B"/*.manifest "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
           ls -lh "$GITHUB_WORKSPACE/out/"
-          find "$GITHUB_WORKSPACE/out" -name '*sysupgrade*.bin' -printf 'SYSUPGRADE: %f (%s bytes)\n'
 
       - name: 上传固件
         if: success()
