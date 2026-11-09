@@ -1,16 +1,16 @@
-name: Build LibWrt AX3600 stock (6.12.112)
+name: Build LibWrt AX3600 stock
 
 on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "LibWrt 分支"
+        description: "源码基线：25.12-nss = 滚动分支(默认、SNAPSHOT、内核随分支更新)；v25.12.2 = 固定发布版(同源、内核6.12.103)"
         required: true
+        type: choice
+        options:
+          - "25.12-nss"
+          - "v25.12.2"
         default: "25.12-nss"
-      with_wireguard:
-        description: "附带原生 WireGuard（内核对齐后才可编译）"
-        type: boolean
-        default: true
 
 env:
   TZ: Asia/Shanghai
@@ -20,6 +20,7 @@ jobs:
     # 依赖清单含 libncurses5-dev 等 22.04 专用包，不能贸然切 24.04。
     # 注意：ubuntu-22.04 自 2026-09-17 起进入弃用期，2027-04-17 彻底移除，
     # 期间可能排队变慢；若该标签不可用，需同步改依赖清单后再切换。
+    # 固件不编 OpenClash / ruby，编译量回到常规规模；350min 保留作余量。
     runs-on: ubuntu-22.04
     timeout-minutes: 350
     steps:
@@ -56,43 +57,58 @@ jobs:
             https://github.com/LiBwrt/LibWrt.git "$GITHUB_WORKSPACE/libwrt"
           cd "$GITHUB_WORKSPACE/libwrt"
           git log -1 --format='COMMIT %H | %ci | %s'
+          echo "=== 内核版本（随基线变化，不写死）==="
           grep -H 'LINUX_VERSION-6.12' target/linux/generic/kernel-6.12
+          echo "=== 发行版本 / 官方软件源 ==="
+          grep -E '^VERSION_(NUMBER|CODE|REPO):=' include/version.mk
+          echo "=== feeds 是否锁定 commit（^sha = 固定发布基线）==="
+          grep -E '^src-git' feeds.conf.default
+          KV=$(sed -n 's/^LINUX_VERSION-6\.12 = //p' target/linux/generic/kernel-6.12)
+          echo "本次基线: ${{ inputs.branch }} / 内核 6.12${KV}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 更新并安装 feeds
         working-directory: libwrt
         run: ./scripts/feeds update -a && ./scripts/feeds install -a
 
-      - name: 校验目标包确实存在于 feeds（防止 defconfig 静默丢包）
+      - name: 核对固件必编包与后续可安装代理包（代理一律不编进固件）
         working-directory: libwrt
         run: |
+          echo "=== 固件必编包（缺一个就终止）==="
           miss=0
           for p in adguardhome smartdns luci-theme-argon luci-app-argon-config \
                    luci-app-adguardhome luci-app-smartdns; do
-            hit=$(find feeds package -maxdepth 5 -type d -name "$p" -print -quit 2>/dev/null)
-            if [ -n "$hit" ]; then
-              echo "OK   $p -> $hit"
-            else
-              echo "MISS $p"
-              miss=1
-            fi
+            hit=$(find feeds package -maxdepth 6 -type d -name "$p" -print -quit 2>/dev/null)
+            if [ -n "$hit" ]; then echo "OK   $p -> $hit"; else echo "MISS $p"; miss=1; fi
           done
           [ "$miss" -eq 0 ] || { echo "::error::缺少上述包定义，请检查 feeds 分支后重试"; exit 1; }
+          echo "=== 后续 apk 可装包（只需源里有，不写进 .config）==="
+          for p in sing-box luci-app-homeproxy luci-app-openclash luci-compat \
+                   ruby-yaml unzip; do
+            hit=$(find feeds package -maxdepth 6 -type d -name "$p" -print -quit 2>/dev/null)
+            if [ -n "$hit" ]; then
+              echo "OK   $p -> $hit"
+              grep -E '^(PKG_VERSION|LUCI_DEPENDS|DEPENDS)' "$hit/Makefile" 2>/dev/null | head -4 || true
+            else
+              echo "NOTE $p 不在 feeds 源码树（包名可能由 luci.mk 生成；现网 apk 源已实测可装）"
+            fi
+          done
+          echo "=== sing-box 构建标签（Hysteria2 需要 with_quic）==="
+          SB=$(find feeds package -maxdepth 6 -type d -name sing-box -print -quit 2>/dev/null)
+          if [ -n "$SB" ]; then
+            grep -n 'GO_PKG_TAGS' "$SB/Makefile" || true
+          else
+            echo "::warning::feeds 里没有 sing-box，刷机后 apk add sing-box 可能不可用"
+          fi
 
       - name: 写入 .config 并断言机型与必编包
         run: |
           cp "$GITHUB_WORKSPACE/config.seed" "$GITHUB_WORKSPACE/libwrt/.config"
           cd "$GITHUB_WORKSPACE/libwrt"
-          if [ "${{ inputs.with_wireguard }}" = "true" ]; then
-            printf '%s\n' \
-              'CONFIG_PACKAGE_wireguard-tools=y' \
-              'CONFIG_PACKAGE_kmod-wireguard=y' \
-              'CONFIG_PACKAGE_luci-proto-wireguard=y' >> .config
-          fi
           make defconfig
           echo "=== 已选中的设备符号（必须只有 AX3600 stock）==="
           grep -E '^CONFIG_TARGET.*DEVICE.*=y|^CONFIG_TARGET_PROFILE' .config || true
           echo "=== 关键包复核 ==="
-          grep -E 'CONFIG_PACKAGE_(adguardhome|smartdns|luci-theme-argon|luci-app-(adguardhome|smartdns|argon-config)|wireguard-tools|kmod-wireguard)=' .config || true
+          grep -E 'CONFIG_PACKAGE_(adguardhome|smartdns|luci-theme-argon|luci-app-(adguardhome|smartdns|argon-config))=' .config || true
           echo "=== 断言 1：目标设备确实是 xiaomi_ax3600-stock ==="
           if ! grep -Eq '^CONFIG_TARGET_qualcommax_ipq807x_DEVICE_xiaomi_ax3600[-_]stock=y' .config; then
             echo "::error::目标设备符号未生效，会编成别的机型（第一次就栽在这里），立即终止"
@@ -106,6 +122,26 @@ jobs:
             if grep -qx "$s" .config; then echo "OK   $s"; else echo "MISS $s"; miss=1; fi
           done
           [ "$miss" -eq 0 ] || { echo "::error::关键包未进入 .config，立即终止"; exit 1; }
+          echo "=== 断言 3：固件不应含代理 LuCI / 内核（用户要求后续自行安装）==="
+          PROXY=$(grep -E '^CONFIG_PACKAGE_(luci-app-(openclash|homeproxy|nikki|passwall)|sing-box|mihomo|xray-core|ruby|ruby-yaml|luci-compat|unzip|dnsmasq_full_nftset)=y' .config || true)
+          if [ -n "$PROXY" ]; then
+            echo "::warning::以下代理相关包被选中，请确认是否 target 默认带入：$PROXY"
+          else
+            echo "OK   固件不含代理 LuCI / 内核 / ruby"
+          fi
+          echo "=== 后续 apk 安装所需的 kmod 是否都已编入（这些无法在线安装）==="
+          kmiss=0
+          for p in kmod-tun kmod-inet-diag kmod-netlink-diag kmod-nft-tproxy kmod-nft-socket; do
+            if grep -qx "CONFIG_PACKAGE_$p=y" .config; then echo "OK   $p"; else echo "MISS $p"; kmiss=1; fi
+          done
+          [ "$kmiss" -eq 0 ] || echo "::warning::上述 kmod 缺失会让刷机后 apk add sing-box / luci-app-homeproxy 失败或功能不全"
+          echo "=== WireGuard 复核（应为空）==="
+          WG=$(grep -E '^CONFIG_PACKAGE_(wireguard-tools|kmod-wireguard|luci-proto-wireguard)=y' .config || true)
+          if [ -n "$WG" ]; then
+            echo "::warning::WireGuard 仍被选中，可能是 target 默认包集带入：$WG"
+          else
+            echo "OK   WireGuard 三个包均未选中"
+          fi
           echo "=== 附加 kmod 生效报告（MISS = 源码无此包或被 target 排除，已跳过，不影响编译）==="
           grep -E '^CONFIG_PACKAGE_kmod-' "$GITHUB_WORKSPACE/config.seed" \
             | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | while read -r p; do
@@ -143,6 +179,8 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             echo "=== 编译失败 (rc=$rc)，最后 300 行 ==="
             tail -n 300 "$LOG"
+            echo "=== error / fatal 相关行（最后 40 条）==="
+            grep -inE '\b(error|fatal|failed)\b' "$LOG" | tail -40 || true
             exit "$rc"
           fi
           echo "=== 编译成功，最后 80 行 ==="
@@ -175,6 +213,15 @@ jobs:
           echo "=== 所有镜像文件 ==="
           find "$B" -maxdepth 1 -type f \( -name '*.bin' -o -name '*.ubi' -o -name '*.manifest' \) \
             -printf '%f (%s bytes)\n' | sort
+          echo "=== manifest 复核：关键 kmod / WireGuard / 是否混入代理应用 ==="
+          grep -iE 'kmod-(tun|inet-diag|netlink-diag|nft-tproxy|nft-socket)|wireguard|openclash|homeproxy|sing-box|ruby' "$B"/*.manifest \
+            || echo '(manifest 无匹配，请回看上方 MISS 报告)'
+          echo "=== 固件应不含代理 LuCI / 内核 ==="
+          if grep -iE '^(luci-app-(openclash|homeproxy|nikki|passwall)|sing-box|mihomo|xray-core|ruby) ' "$B"/*.manifest; then
+            echo "::warning::固件里出现了代理应用，请检查 target 默认包集"
+          else
+            echo "OK   固件干净，代理应用全部留给刷机后安装"
+          fi
           FW=$(find "$B" -maxdepth 1 -type f \
             -name '*xiaomi_ax3600-stock*squashfs-sysupgrade*.bin' -print -quit)
           if [ -z "$FW" ]; then
@@ -185,12 +232,23 @@ jobs:
           cp "$B"/*xiaomi_ax3600* "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
           cp "$B"/*.manifest "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
           ls -lh "$GITHUB_WORKSPACE/out/"
+          {
+            echo "### 刷机后安装代理（VLESS / Hysteria2）"
+            echo "固件只内置全部必需 kmod，代理内核与 LuCI 不编入，刷机后直接装："
+            echo "  apk update && apk add sing-box luci-app-homeproxy"
+            echo "sing-box 1.12.25 full 版构建标签含 with_quic，支持 VLESS(Reality) 与 Hysteria2。"
+            echo "若仍要 OpenClash：apk add luci-app-openclash（源里有），装完在"
+            echo "  插件设置 → 版本更新 点『更新内核』即可下载 mihomo 内核（走 GitHub raw，"
+            echo "  不通就在 GitHub 地址代理选项切 CDN，或手动上传 clash_meta 到 /etc/openclash/core/）。"
+            echo "  apk 源里没有 mihomo 包，内核下载不经过「系统 → 软件包」页面。"
+            echo "注意：这是 DNS 旁路由，只能做显式代理，勿开 TUN / 透明代理 / 内置 DNS 抢 :53。"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传固件
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: libwrt-ax3600-stock-6.12.112
+          name: libwrt-ax3600-stock-${{ inputs.branch }}
           path: out/*
           retention-days: 30
           if-no-files-found: error
