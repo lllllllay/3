@@ -141,27 +141,60 @@ CONFIG_PACKAGE_luci-i18n-vantage-zh-cn=y
 #   （客户端手动指向），不要开 TUN / 透明代理 / 内置 DNS 抢 :53，
 #   否则会破坏 AGH :53 -> SmartDNS :6053 的链路。
 
-##### 现网在用、但故意仍不编进固件的插件（2026-11-18 实机核对）#####
-# 对照方法：/rom/lib/apk/db/installed（镜像内置 299 个包）与
-# /lib/apk/db/installed（当前 336 个包）做差集 -> 后装 37 个包、其中 kmod 为 0 个。
-# 也就是说：所有 kmod 都在 squashfs 里，后装的都是纯用户态包 —— 内核换代不会
-# 把它们带崩，刷机不加 -n 时 /overlay 原样保留，插件照旧在。
+##### Passwall（2026-11-18 改判：编进固件）#####
+# 为什么改判：2026-11-18 刷机实测——sysupgrade 只保留 /etc 侧配置
+# （/etc/config/passwall 的 51 个节点、/etc/passwall/rules 都在），
+# /usr 侧的已安装程序和 /lib/apk/db 会被新镜像整体覆盖。
+# 结果就是 LuCI 菜单、init 脚本、xray/sing-box 二进制全没了，apk 里也查不到。
+# 也就是说「后装」在每次刷机后都要重装一遍，不可持续，所以改为编进 squashfs。
+# 配置侧不用迁移：包定义里 conffiles 声明了 /etc/config/passwall、
+# /etc/config/passwall_server、/etc/passwall/，sysupgrade 会原样保留。
 #
-# 包名                                   当前版本            来源
-# luci-app-passwall / -i18n              26.11.11-r1         后装（passwall 二进制源）
-# luci-app-cpufreq (+ i18n)              target 默认带入     镜像内置（ROM 里有）
-# adguardhome / smartdns / luci-app-*    target+本文件       镜像内置
+# 源码迁移说明（2026-11-18 核实）：
+#   xiaorouji/openwrt-passwall 已 404，v1 迁到 Openwrt-Passwall 组织；
+#   xiaorouji/openwrt-passwall-packages 仍在，提供 xray-core / sing-box /
+#   chinadns-ng / microsocks / tcping / ipt2socks 等二进制。
+#   上游 PKG_VERSION:=26.11.11，与现网装过的 26.11.11-r1 完全一致。
 #
-# 为什么 Passwall 仍不编：
-#   1) 你 2026-11-09 定过"代理应用一律不编"，只编 kmod；
-#   2) 它依赖 haproxy / chinadns-ng / dns2socks / microsocks / geoview /
-#      v2ray-geoip+geosite / lua5.1+5.4 / luci-compat / unzip 共十几个包，
-#      编进去会把 squashfs 明显撑大，而这些包升级频繁，跟着固件走反而更难维护。
-# Vantage 主题已于 2026-11-18 改为编进固件（用户决定 argon 删掉、Vantage 当默认主题），
+# 子选项按下表钉死（Makefile 的 config 段决定编进哪些核心；编少了打开插件会提示缺核心）：
+#   透明代理  Nftables=y  Iptables=n        （本固件 firewall4 + nftables）
+#   协议核心  Xray=y  SingBox=y             （VLESS-Reality 走 Xray，Hysteria2/Hy2 走 sing-box）
+#   其余核心  Hysteria / NaiveProxy / ShadowTLS / SS-Rust / SSR / V2ray-Plugin /
+#             Xray-Plugin 全部 = n         （SS/SSR 节点由 sing-box 或 xray 承接，
+#                                          省掉 Rust 与一堆 C 组件的编译时间）
+#   辅助      SmartDNS=y（镜像本就带）/ Simple-Obfs=y / Geoview=n / Haproxy=n
+#   Geo 数据  V2ray-Geodata=n              （geoip.dat + geosite.dat 20MB 级，
+#                                          刷完在 Passwall「规则管理」点一次更新即可，
+#                                          没必要长期占着 squashfs）
+#
+# 依赖侧注意：LUCI_DEPENDS 里有 +dnsmasq-full，必须同步把 dnsmasq 换掉，
+# 否则两者 PROVIDE 同一个 dnsmasq，defconfig 会报冲突。
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
+# CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy is not set
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SmartDNS=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=y
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadow_TLS is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Server is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin is not set
+CONFIG_PACKAGE_dnsmasq-full=y
+# CONFIG_PACKAGE_dnsmasq is not set
+
+# Vantage 主题已于 2026-11-18 编进固件（用户决定 argon 删掉、Vantage 当默认主题），
 #   见上面「主题：Vantage」段 —— 它的源码不在 LibWrt feeds 里，由 workflow 追加外部 feed。
-#
-# 结论：Passwall 保持 overlay 方式，刷机后若发现掉了，一条命令补回（见 workflow 的
-# 运行摘要）。真正必须"编进固件"的是 kmod —— 见下面「附加 kmod」段。
+# Passwall 也从 2026-11-18 起编进固件（原因见本节开头）。
 
 ##### LuCI 中文 / 基础工具（保持与现网一致）#####
 CONFIG_PACKAGE_luci=y

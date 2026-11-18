@@ -66,7 +66,7 @@ jobs:
           KV=$(sed -n 's/^LINUX_VERSION-6\.12 = //p' target/linux/generic/kernel-6.12)
           echo "本次基线: ${{ inputs.branch }} / 内核 6.12${KV}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 追加 Vantage 主题源，更新并安装 feeds
+      - name: 追加 Vantage + Passwall 源，更新并安装 feeds
         working-directory: libwrt
         run: |
           # Vantage 不在 LibWrt 的 feeds 里，但它支持当外部 feed 编译：
@@ -77,27 +77,40 @@ jobs:
           if ! grep -q 'luci-theme-vantage' feeds.conf.default; then
             echo 'src-git vantage https://github.com/anothadev/luci-theme-vantage.git;main' >> feeds.conf.default
           fi
+          # Passwall（v1）自 2026 起迁到 Openwrt-Passwall 组织；旧地址 xiaorouji/openwrt-passwall
+          # 已 404。两个源分工：luci 侧是插件本体（Lua，架构无关，PKG_VERSION 26.11.11），
+          # packages 侧提供 xray-core / sing-box / chinadns-ng / microsocks / tcping 等二进制。
+          # 注意：passwall_packages 里的 smartdns / xray-core / sing-box 与官方 packages feed
+          # 同名，feeds 后装的会覆盖先装的，这是已知现象，不影响编译。
+          if ! grep -q 'passwall_packages' feeds.conf.default; then
+            echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' >> feeds.conf.default
+            echo 'src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main' >> feeds.conf.default
+          fi
           echo "=== 本次生效的 feeds ==="
           grep -E '^src-git' feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          echo "=== Vantage 包定义落位检查 ==="
-          for p in luci-theme-vantage luci-app-vantage; do
+          echo "=== Vantage / Passwall 包定义落位检查 ==="
+          for p in luci-theme-vantage luci-app-vantage luci-app-passwall \
+                   xray-core sing-box chinadns-ng microsocks tcping ipt2socks; do
             hit=$(find feeds package -maxdepth 6 -type d -name "$p" -print -quit 2>/dev/null)
-            if [ -n "$hit" ]; then echo "OK   $p -> $hit"; else echo "::error::$p 未安装到 package/feeds，Vantage 编不进来"; exit 1; fi
+            if [ -n "$hit" ]; then echo "OK   $p -> $hit"; else echo "::error::$p 未安装到 package/feeds，编不进固件"; exit 1; fi
           done
 
-      - name: 核对固件必编包与后续可安装代理包（代理一律不编进固件）
+      - name: 核对固件必编包与后续可安装代理包（Passwall 已改为编进固件）
         working-directory: libwrt
         run: |
           echo "=== 固件必编包（缺一个就终止）==="
           miss=0
           for p in adguardhome smartdns luci-theme-vantage luci-app-vantage \
-                   luci-app-adguardhome luci-app-smartdns; do
+                   luci-app-adguardhome luci-app-smartdns luci-app-passwall; do
             hit=$(find feeds package -maxdepth 6 -type d -name "$p" -print -quit 2>/dev/null)
             if [ -n "$hit" ]; then echo "OK   $p -> $hit"; else echo "MISS $p"; miss=1; fi
           done
           [ "$miss" -eq 0 ] || { echo "::error::缺少上述包定义，请检查 feeds 分支后重试"; exit 1; }
+          echo "=== Passwall 依赖清单（从 Makefile 实读，确认依赖都在源码树里）==="
+          PW=$(find feeds package -maxdepth 6 -type d -name luci-app-passwall -print -quit 2>/dev/null)
+          grep -E '^(PKG_VERSION|LUCI_DEPENDS)' -A2 "$PW/Makefile" 2>/dev/null || true
           echo "=== 后续 apk 可装包（只需源里有，不写进 .config）==="
           for p in sing-box luci-app-homeproxy luci-app-openclash luci-compat \
                    ruby-yaml unzip; do
@@ -132,19 +145,28 @@ jobs:
             echo ">>> 请把上面「已选中的设备符号」里的实际名字告诉我，改 config.seed 对应行即可"
             exit 1
           fi
-          echo "=== 断言 2：三个必编包确实进了 .config ==="
+          echo "=== 断言 2：必编包确实进了 .config ==="
           miss=0
           for s in CONFIG_PACKAGE_adguardhome=y CONFIG_PACKAGE_smartdns=y \
-                   CONFIG_PACKAGE_luci-theme-vantage=y; do
+                   CONFIG_PACKAGE_luci-theme-vantage=y CONFIG_PACKAGE_luci-app-passwall=y; do
             if grep -qx "$s" .config; then echo "OK   $s"; else echo "MISS $s"; miss=1; fi
           done
           [ "$miss" -eq 0 ] || { echo "::error::关键包未进入 .config，立即终止"; exit 1; }
-          echo "=== 断言 3：固件不应含代理 LuCI / 内核（用户要求后续自行安装）==="
-          PROXY=$(grep -E '^CONFIG_PACKAGE_(luci-app-(openclash|homeproxy|nikki|passwall)|sing-box|mihomo|xray-core|ruby|ruby-yaml|luci-compat|unzip|dnsmasq_full_nftset)=y' .config || true)
+          echo "=== 断言 3：Passwall 的核心与子选项（决定了刷完后能跑哪些协议）==="
+          for s in CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y \
+                   CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y \
+                   CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y \
+                   CONFIG_PACKAGE_xray-core=y CONFIG_PACKAGE_sing-box=y; do
+            if grep -qx "$s" .config; then echo "OK   $s"; else echo "::warning::MISS $s（若持续缺失，Passwall 打开后对应协议不可用）"; fi
+          done
+          echo "=== 断言 4：不应再出现第二套代理前端（Passwall 已定稿，其余不编）==="
+          # luci-app-passwall / xray-core / sing-box / luci-compat / unzip 已由我们的
+          # 「Passwall」段主动选中，这里只盯"别的代理前端"和 ruby（会白吃体积）。
+          PROXY=$(grep -E '^CONFIG_PACKAGE_(luci-app-(openclash|homeproxy|nikki)|mihomo|ruby|ruby-yaml|dnsmasq_full_nftset)=y' .config || true)
           if [ -n "$PROXY" ]; then
             echo "::warning::以下代理相关包被选中，请确认是否 target 默认带入：$PROXY"
           else
-            echo "OK   固件不含代理 LuCI / 内核 / ruby"
+            echo "OK   固件不含 openclash / homeproxy / nikki / mihomo / ruby"
           fi
           echo "=== 后续 apk 安装所需的 kmod 是否都已编入（这些无法在线安装）==="
           kmiss=0
@@ -330,15 +352,15 @@ jobs:
           cp "$B"/*.manifest "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
           ls -lh "$GITHUB_WORKSPACE/out/"
           {
-            echo "### 刷机后安装代理（VLESS / Hysteria2）"
-            echo "固件只内置全部必需 kmod，代理内核与 LuCI 不编入，刷机后直接装："
-            echo "  apk update && apk add sing-box luci-app-homeproxy"
-            echo "sing-box 1.12.25 full 版构建标签含 with_quic，支持 VLESS(Reality) 与 Hysteria2。"
-            echo "若仍要 OpenClash：apk add luci-app-openclash（源里有），装完在"
-            echo "  插件设置 → 版本更新 点『更新内核』即可下载 mihomo 内核（走 GitHub raw，"
-            echo "  不通就在 GitHub 地址代理选项切 CDN，或手动上传 clash_meta 到 /etc/openclash/core/）。"
-            echo "  apk 源里没有 mihomo 包，内核下载不经过「系统 → 软件包」页面。"
-            echo "注意：这是 DNS 旁路由，只能做显式代理，勿开 TUN / 透明代理 / 内置 DNS 抢 :53。"
+            echo "### 代理（Passwall 已编进固件）"
+            echo "- 本镜像内置：luci-app-passwall 26.11.11 + luci-i18n-passwall-zh-cn，"
+            echo "  以及 xray-core、sing-box（含 with_quic，VLESS(Reality) 与 Hysteria2 都能跑）、"
+            echo "  chinadns-ng / dns2socks / microsocks / tcping / ipt2socks / dnsmasq-full。"
+            echo "- 透明代理按 nftables(fw4) 编译，Iptables 侧未编。"
+            echo "- Geo 数据没编（省 20MB）：刷完进 Passwall「规则管理」点一次更新即可。"
+            echo "- 现有 51 个节点配置在 /etc/config/passwall，sysupgrade 会保留，刷完直接可用。"
+            echo "- 这是 DNS 旁路由：勿开 TUN / 全局透明代理 / 内置 DNS 抢 :53，"
+            echo "  会打断 AGH :53 -> SmartDNS :6053 的链路。"
             echo ""
             echo "### 1G 内存（本机硬件已改 1G）"
             echo "- 编译侧只锁了 NSS Memory Profile = HIGH（1G 档），已由上面的断言步骤把关。"
@@ -355,13 +377,11 @@ jobs:
             echo "  若已是旧 overlay（脚本已跑过就不再执行），手动补："
             echo "  uci set wireless.default_radio1.disassoc_low_ack=0 && uci commit wireless && wifi reload"
             echo ""
-            echo "### 已装插件的保留规则（重要）"
-            echo "- 镜像内置：adguardhome / smartdns / luci-app-* / cpufreq / 全部 kmod。"
-            echo "- 后装（在 /overlay，37 个包，其中 kmod 为 0）：luci-app-passwall 及其依赖、"
-            echo "  luci-app-vantage + luci-theme-vantage。"
-            echo "- 因此刷机【不要加 -n / 不要恢复出厂】，sysupgrade 会原样保留 overlay。"
-            echo "- 万一掉了，补装命令："
-            echo "  apk update && apk add luci-app-passwall luci-app-vantage luci-theme-vantage"
+            echo "### 刷机后还会保留什么、会丢什么"
+            echo "- sysupgrade 只搬 /etc 侧：/etc/config、/etc/passwall、/etc/sysupgrade.conf 白名单。"
+            echo "- 丢的是 /usr 侧后装程序与 apk 数据库 —— 所以后装的插件每次刷机都要重装。"
+            echo "- 本镜像已把 passwall / vantage 都编进 squashfs，不再依赖 overlay。"
+            echo "- 仍然【不要加 -n / 不要恢复出厂】：那样连 /etc/config/passwall 也会清空。"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # 先上传固件再做后续核对：核对断言失败时不能把已经编好的固件一起吞掉。
