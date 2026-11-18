@@ -293,7 +293,7 @@ jobs:
 
       - name: 上传编译日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: build-log
           path: build.log.gz
@@ -412,7 +412,7 @@ jobs:
 
       - name: 上传固件
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: libwrt-ax3600-stock-${{ inputs.branch }}
           path: out/*
