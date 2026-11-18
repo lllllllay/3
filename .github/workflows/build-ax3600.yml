@@ -66,28 +66,38 @@ jobs:
           KV=$(sed -n 's/^LINUX_VERSION-6\.12 = //p' target/linux/generic/kernel-6.12)
           echo "本次基线: ${{ inputs.branch }} / 内核 6.12${KV}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 更新并安装 feeds
+      - name: 追加 Vantage 主题源，更新并安装 feeds
         working-directory: libwrt
-        run: ./scripts/feeds update -a && ./scripts/feeds install -a
+        run: |
+          # Vantage 不在 LibWrt 的 feeds 里，但它支持当外部 feed 编译：
+          # luci-theme-vantage/Makefile 会优先用 ../../luci.mk，没有则回落 $(TOPDIR)/feeds/luci/luci.mk。
+          # 主题包自带 root/etc/uci-defaults/30_luci-theme-vantage，首次启动会注册
+          # luci.themes.Vantage 并在"新注册"时把 luci.main.mediaurlbase 设为 /luci-static/vantage，
+          # 所以不需要我们再写一个设置默认主题的脚本（也不会覆盖管理员后来手动改的主题）。
+          if ! grep -q 'luci-theme-vantage' feeds.conf.default; then
+            echo 'src-git vantage https://github.com/anothadev/luci-theme-vantage.git;main' >> feeds.conf.default
+          fi
+          echo "=== 本次生效的 feeds ==="
+          grep -E '^src-git' feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          echo "=== Vantage 包定义落位检查 ==="
+          for p in luci-theme-vantage luci-app-vantage; do
+            hit=$(find feeds package -maxdepth 6 -type d -name "$p" -print -quit 2>/dev/null)
+            if [ -n "$hit" ]; then echo "OK   $p -> $hit"; else echo "::error::$p 未安装到 package/feeds，Vantage 编不进来"; exit 1; fi
+          done
 
       - name: 核对固件必编包与后续可安装代理包（代理一律不编进固件）
         working-directory: libwrt
         run: |
           echo "=== 固件必编包（缺一个就终止）==="
           miss=0
-          for p in adguardhome smartdns luci-theme-argon \
+          for p in adguardhome smartdns luci-theme-vantage luci-app-vantage \
                    luci-app-adguardhome luci-app-smartdns; do
             hit=$(find feeds package -maxdepth 6 -type d -name "$p" -print -quit 2>/dev/null)
             if [ -n "$hit" ]; then echo "OK   $p -> $hit"; else echo "MISS $p"; miss=1; fi
           done
           [ "$miss" -eq 0 ] || { echo "::error::缺少上述包定义，请检查 feeds 分支后重试"; exit 1; }
-          echo "=== 可选：argon 主题设置页（ImmortalWrt 25.12 起已从 luci feed 移除该 app）==="
-          hit=$(find feeds package -maxdepth 6 -type d -name luci-app-argon-config -print -quit 2>/dev/null)
-          if [ -n "$hit" ]; then
-            echo "OK   luci-app-argon-config -> $hit（本分支有，如需可在 config.seed 里加回）"
-          else
-            echo "NOTE 本分支无 luci-app-argon-config（25.12 起移除，24.10 还有），主题本体不受影响"
-          fi
           echo "=== 后续 apk 可装包（只需源里有，不写进 .config）==="
           for p in sing-box luci-app-homeproxy luci-app-openclash luci-compat \
                    ruby-yaml unzip; do
@@ -115,7 +125,7 @@ jobs:
           echo "=== 已选中的设备符号（必须只有 AX3600 stock）==="
           grep -E '^CONFIG_TARGET.*DEVICE.*=y|^CONFIG_TARGET_PROFILE' .config || true
           echo "=== 关键包复核 ==="
-          grep -E 'CONFIG_PACKAGE_(adguardhome|smartdns|luci-theme-argon|luci-app-(adguardhome|smartdns|argon-config))=' .config || true
+          grep -E 'CONFIG_PACKAGE_(adguardhome|smartdns|luci-theme-vantage|luci-app-(adguardhome|smartdns|vantage))=' .config || true
           echo "=== 断言 1：目标设备确实是 xiaomi_ax3600-stock ==="
           if ! grep -Eq '^CONFIG_TARGET_qualcommax_ipq807x_DEVICE_xiaomi_ax3600[-_]stock=y' .config; then
             echo "::error::目标设备符号未生效，会编成别的机型（第一次就栽在这里），立即终止"
@@ -125,7 +135,7 @@ jobs:
           echo "=== 断言 2：三个必编包确实进了 .config ==="
           miss=0
           for s in CONFIG_PACKAGE_adguardhome=y CONFIG_PACKAGE_smartdns=y \
-                   CONFIG_PACKAGE_luci-theme-argon=y; do
+                   CONFIG_PACKAGE_luci-theme-vantage=y; do
             if grep -qx "$s" .config; then echo "OK   $s"; else echo "MISS $s"; miss=1; fi
           done
           [ "$miss" -eq 0 ] || { echo "::error::关键包未进入 .config，立即终止"; exit 1; }
@@ -190,14 +200,17 @@ jobs:
           echo "ath11k 的 qcom,ath11k-fw-memory-mode 保持 <1>（512M 档）：改成 0 需同步把 q6"
           echo "保留区从 55MB 放大到约 97MB，属高风险改动，本仓库不做。"
 
-      - name: 预置 argon 为默认主题
+      - name: 确认 Vantage 自带「设为默认主题」脚本（argon 已移除，不再由我们写 mediaurlbase）
         run: |
-          D="$GITHUB_WORKSPACE/libwrt/files/etc/uci-defaults"
-          mkdir -p "$D"
-          printf '%s\n' '#!/bin/sh' \
-            "uci set luci.main.mediaurlbase='/luci-static/argon'" \
-            'uci commit luci' 'exit 0' > "$D/99-argon-theme"
-          chmod +x "$D/99-argon-theme"
+          F="$GITHUB_WORKSPACE/libwrt/feeds/vantage/luci-theme-vantage/root/etc/uci-defaults/30_luci-theme-vantage"
+          if [ -f "$F" ]; then
+            echo "OK   Vantage 自带 uci-defaults：$F"
+            grep -nE 'luci.themes.Vantage|mediaurlbase|PKG_UPGRADE' "$F" || true
+            sh -n "$F" && echo "OK   sh -n 通过"
+          else
+            echo "::warning::没找到 Vantage 的 30_luci-theme-vantage，刷机后默认主题可能仍是 Bootstrap"
+            echo "::warning::如出现该情况，在 LuCI「系统 → 语言与界面」里手动切到 Vantage 即可"
+          fi
 
       # 5G 频繁把客户端踢下线（hostapd 报 excessive missing ACKs）：
       # ath11k 在 NSS WiFi 卸载下会向 hostapd 发 PEER_STA_KICKOUT，被当成低 ACK 处理，
