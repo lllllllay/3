@@ -75,12 +75,19 @@ jobs:
         run: |
           echo "=== 固件必编包（缺一个就终止）==="
           miss=0
-          for p in adguardhome smartdns luci-theme-argon luci-app-argon-config \
+          for p in adguardhome smartdns luci-theme-argon \
                    luci-app-adguardhome luci-app-smartdns; do
             hit=$(find feeds package -maxdepth 6 -type d -name "$p" -print -quit 2>/dev/null)
             if [ -n "$hit" ]; then echo "OK   $p -> $hit"; else echo "MISS $p"; miss=1; fi
           done
           [ "$miss" -eq 0 ] || { echo "::error::缺少上述包定义，请检查 feeds 分支后重试"; exit 1; }
+          echo "=== 可选：argon 主题设置页（ImmortalWrt 25.12 起已从 luci feed 移除该 app）==="
+          hit=$(find feeds package -maxdepth 6 -type d -name luci-app-argon-config -print -quit 2>/dev/null)
+          if [ -n "$hit" ]; then
+            echo "OK   luci-app-argon-config -> $hit（本分支有，如需可在 config.seed 里加回）"
+          else
+            echo "NOTE 本分支无 luci-app-argon-config（25.12 起移除，24.10 还有），主题本体不受影响"
+          fi
           echo "=== 后续 apk 可装包（只需源里有，不写进 .config）==="
           for p in sing-box luci-app-homeproxy luci-app-openclash luci-compat \
                    ruby-yaml unzip; do
@@ -153,6 +160,12 @@ jobs:
             done
           echo "=== 最终编入固件的全部 kmod ==="
           grep -E '^CONFIG_PACKAGE_kmod-.*=y' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
+          echo "=== 其它 CONFIG_PACKAGE_* 核对（MISS 仅提示：本分支无此包或被 target 排除，不影响编译）==="
+          grep -E '^CONFIG_PACKAGE_' "$GITHUB_WORKSPACE/config.seed" \
+            | grep -v '^CONFIG_PACKAGE_kmod-' | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | while read -r p; do
+              grep -qx "CONFIG_PACKAGE_$p=y" .config || echo "MISS $p"
+            done
+          echo "=== 上面若出现 MISS，说明 config.seed 里请求了本分支不存在的包，需要从 config.seed 删掉 ==="
 
       - name: 断言 1G 内存档位（NSS Memory Profile = HIGH）
         run: |

@@ -94,8 +94,12 @@ CONFIG_PACKAGE_smartdns=y
 CONFIG_PACKAGE_luci-app-smartdns=y
 CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=y
 CONFIG_PACKAGE_luci-theme-argon=y
-CONFIG_PACKAGE_luci-app-argon-config=y
-CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
+# 注意：luci-app-argon-config / luci-i18n-argon-config-zh-cn 不写。
+# ImmortalWrt 的 luci feed 在 openwrt-25.12 分支已移除这两个包（openwrt-24.10 分支还有），
+# 本仓库构建目标是 25.12-nss，写了只会被 make defconfig 静默丢弃，还会让
+# 「核对固件必编包」步骤误报 MISS、把整个构建挡在这一步。
+# 主题本体 luci-theme-argon 仍在 luci feed 里，只少了「主题设置」那一页。
+# 要恢复这一页需另加 jerrykuku/luci-theme-argon 源，但它与 luci feed 里的同名主题撞包，收益不值。
 
 ##### 代理软件（2026-11-09 19:40 用户定稿：一律不编进固件）#####
 # 不编 luci-app-openclash / luci-app-homeproxy / luci-app-nikki / sing-box /
