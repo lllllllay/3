@@ -395,8 +395,15 @@ jobs:
           kmod-ath11k-ahb
           kmod-mac80211'
           miss=0
+          # apk 构建的 manifest 里包名带版本（kmod-xxx-6.12.112.6.18.55-r1），
+          # 也可能写成 "名字 版本" / "名字=版本"。先按边界剥掉版本，再做全名精确比对，
+          # 避免 kmod-ath11k 被 kmod-ath11k-ahb 误判为已存在。
+          echo "=== manifest 格式取证（前 6 行）==="
+          head -n 6 "$M" | cut -c1-120
+          CLEAN=$(sed -E 's/[[:space:]=:].*$//; s/-[0-9][0-9A-Za-z.+~_-]*$//' "$M" | sort -u)
+          echo "  剥版本后共 $(printf '%s\n' "$CLEAN" | grep -c . ) 个包"
           for p in $BASE; do
-            if grep -qE "^${p}(-|~)[0-9]" "$M"; then
+            if printf '%s\n' "$CLEAN" | grep -qx -- "$p"; then
               echo "OK   $p"
             else
               echo "MISS $p"
@@ -404,6 +411,8 @@ jobs:
             fi
           done
           if [ "$miss" -ne 0 ]; then
+            echo "=== 名字相近的候选行（判断是否只是格式差异）==="
+            printf '%s\n' "$CLEAN" | grep -E '^(kmod-(nss|ath11k|mac80211|nft|sched|tcp|ifb|tun))' | head -20 || true
             echo "::error::上面 MISS 的 kmod 不在固件里。现网这些是内置的，"
             echo "::error::缺了会影响 Passwall / SQM / NSS 卸载 / WiFi 卸载，刷了会退化。"
             exit 1
