@@ -186,6 +186,35 @@ jobs:
             'uci commit luci' 'exit 0' > "$D/99-argon-theme"
           chmod +x "$D/99-argon-theme"
 
+      # 5G 频繁把客户端踢下线（hostapd 报 excessive missing ACKs）：
+      # ath11k 在 NSS WiFi 卸载下会向 hostapd 发 PEER_STA_KICKOUT，被当成低 ACK 处理，
+      # 关掉 5G 的 disassoc_low_ack 即可规避。2.4G 保持默认（该网段是 IoT 设备，踢人反而是保护）。
+      # 执行时机有保证：/etc/init.d/boot 里先 `/sbin/wifi config` 生成 /etc/config/wireless，
+      # 再跑 /etc/uci-defaults/*，所以这里 wireless 一定已存在，不会写出残缺配置。
+      - name: 预置 5G 关闭「低 ACK 踢人」（disassoc_low_ack=0）
+        run: |
+          D="$GITHUB_WORKSPACE/libwrt/files/etc/uci-defaults"
+          F="$D/99-ax3600-5g-lowack"
+          mkdir -p "$D"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            '# AX3600 (ath11k + NSS offload): 5G 关闭「低 ACK 即踢人」' \
+            '# 现象：iPhone 等设备反复 断-连，hostapd 日志 disconnected due to excessive missing ACKs' \
+            '[ -f /etc/config/wireless ] || exit 0' \
+            'for s in $(uci -q show wireless | grep =wifi-iface | cut -d. -f2 | cut -d= -f1); do' \
+            '    dev=$(uci -q get "wireless.$s.device")' \
+            '    band=$(uci -q get "wireless.$dev.band")' \
+            '    [ "$band" = "5g" ] || continue' \
+            '    uci -q set "wireless.$s.disassoc_low_ack=0"' \
+            'done' \
+            'uci -q commit wireless' \
+            'exit 0' > "$F"
+          chmod +x "$F"
+          echo "=== 写入的 uci-defaults $F ==="
+          cat "$F"
+          echo "=== 语法检查 ==="
+          sh -n "$F" && echo "OK   sh -n 通过"
+
       - name: 预下载源码包
         working-directory: libwrt
         run: make download -j8
@@ -271,6 +300,15 @@ jobs:
             echo "- 内存识别靠 CDT(mtd5) + bootloader 修正 /memory 节点，与固件无关；"
             echo "  刷完用 \`head -3 /proc/meminfo\` 复核，MemTotal 应约 927000 kB。"
             echo "- ath11k 固件内存档位没动（仍 512M 档），原因见 config.seed 注释。"
+            echo ""
+            echo "### 5G 频繁踢客户端（本次已修）"
+            echo "- 现象：设备反复 断-连，hostapd 报 disconnected due to excessive missing ACKs。"
+            echo "- 原因：nss_offload=1 时 ath11k 固件发 PEER_STA_KICKOUT，被 hostapd 当成低 ACK。"
+            echo "- 修复：镜像内置 /etc/uci-defaults/99-ax3600-5g-lowack，首次启动给所有 5g 频段"
+            echo "  的 wifi-iface 写 disassoc_low_ack=0（2.4G 不动）。"
+            echo "- 刷完自查：\`uci get wireless.default_radio1.disassoc_low_ack\` 应为 0；"
+            echo "  若已是旧 overlay（脚本已跑过就不再执行），手动补："
+            echo "  uci set wireless.default_radio1.disassoc_low_ack=0 && uci commit wireless && wifi reload"
             echo ""
             echo "### 已装插件的保留规则（重要）"
             echo "- 镜像内置：adguardhome / smartdns / luci-app-* / cpufreq / 全部 kmod。"
