@@ -364,6 +364,16 @@ jobs:
             echo "  apk update && apk add luci-app-passwall luci-app-vantage luci-theme-vantage"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 先上传固件再做后续核对：核对断言失败时不能把已经编好的固件一起吞掉。
+      - name: 上传固件
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: libwrt-ax3600-stock-${{ inputs.branch }}
+          path: out/*
+          retention-days: 30
+          if-no-files-found: error
+
       - name: 核对固件 kmod 与现网基线（刷机后能力不丢）
         if: success()
         run: |
@@ -418,12 +428,3 @@ jobs:
             exit 1
           fi
           echo "OK   基线 kmod 全部在固件内"
-
-      - name: 上传固件
-        if: success()
-        uses: actions/upload-artifact@v6
-        with:
-          name: libwrt-ax3600-stock-${{ inputs.branch }}
-          path: out/*
-          retention-days: 30
-          if-no-files-found: error
