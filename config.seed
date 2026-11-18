@@ -21,6 +21,15 @@
 # 25.12-nss 滚动分支），去掉产物名/注释里写死的 6.12.112，改为从源码读取内核版本。
 # 19:24 按用户要求把默认改回 25.12-nss；需要同源时手动选 v25.12.2。
 #
+# 2026-11-18 修订（硬件内存已换 1G + 保留现网在用插件）：
+#   - 实测现网 MemTotal = 927772 kB（约 906MB），说明 1G 内存已经被正确识别，
+#     原因见下面「1G 内存」段：内存大小由 CDT(mtd5) 配 DDR + bootloader 修正
+#     /memory 节点决定，与固件编译配置无关，所以【不需要】改 dts memory 节点、
+#     也不需要另做 1G 设备变体。
+#   - 编译侧唯一与内存档位有关的是 NSS 的 memory profile，已显式锁定 HIGH（1G）。
+#   - 现网后装的 Passwall / Vantage 主题故意仍不编进固件（它们活在 overlay，
+#     sysupgrade 默认保留），依赖的 kmod 全部编进 squashfs，不会因内核换代而失效。
+#
 # 2026-11-09 19:40 定稿（用户要求）：固件【不编】任何代理 LuCI 应用与代理内核，
 # 只把后续装代理必须用到的 kmod 一次性编进 squashfs。
 # 理由：kmod 与自编译内核 vermagic 绑定，官方 kmods 源装不上（现网实测
@@ -47,6 +56,35 @@ CONFIG_TARGET_ROOTFS_SQUASHFS=y
 # CONFIG_TARGET_ALL_PROFILES=n
 # CONFIG_TARGET_PER_DEVICE_ROOTFS=n
 # CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_xiaomi_ax3600-stock=y
+
+##### 1G 内存（2026-11-18 实机已换 1G DDR）#####
+# 事实依据：现网固件 `head -3 /proc/meminfo` -> MemTotal 927772 kB（约 906MB），
+# 5G 上 4 台、2.4G 上 9 台客户端同时在线也不紧张，说明 1G 已经全部可用。
+#
+# 为什么不用改 dts：
+#   内存大小在 IPQ807x 上由两层决定 —— CDT(/dev/mtd5) 配置 DDR 训练与容量，
+#   bootloader 随后修正 dtb 里的 /memory 节点。固件源码里
+#   ipq8071-ax3600.dtsi 引用的 ipq8074-512m.dtsi 只描述保留区
+#   (tzapp 0x4a400000 / q6 0x4b000000 / q6_etr 0x4e700000 / ramoops)，
+#   这些地址落在 1G 的低半区，1G 下只是"中间被占一段"，不越界、不冲突。
+#   所以：不改 memory reg、不加 1g dtsi、不换 DEVICE 定义。
+#
+# 唯一需要显式钉住的是 NSS 的内存档位（nss_packages 的
+# qca-nss-drv/Config.in 里 prompt "Memory Profile"）：
+#   NSS_MEM_PROFILE_HIGH   = 1G 档（默认仅对 TARGET_qualcommax_ipq807x 生效）
+#   NSS_MEM_PROFILE_MEDIUM = 512M 档
+#   NSS_MEM_PROFILE_LOW    = 256M 档
+# 选错了不会编不过，只会让 NSS 的缓冲池按小板子分配，白瞎 512M，
+# 高并发/多客户端时更容易丢包。workflow 里有断言把关。
+CONFIG_NSS_MEM_PROFILE_HIGH=y
+# CONFIG_NSS_MEM_PROFILE_MEDIUM is not set
+# CONFIG_NSS_MEM_PROFILE_LOW is not set
+#
+# 明确【不动】的一项：ath11k 的 qcom,ath11k-fw-memory-mode 仍是 <1>（512M 档，
+# 对应 dtb 里 q6 保留区 55MB）。改成 <0>（1G 档）必须同步把 q6 保留区放大到
+# 约 97MB，属改 dts + 改保留区的高风险改动，改错的表现是 WiFi 射频起不来
+# （ath11k qmi fail to assign memory）。收益只是 WiFi 固件多几十 MB 缓冲，
+# 当前 13 台客户端在线也没有内存压力，因此本仓库不做，留作已知项。
 
 ##### 用户要求编进固件的软件（第一次编译 manifest 已验证全部生效）#####
 CONFIG_PACKAGE_adguardhome=y
@@ -84,6 +122,30 @@ CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
 # 注意：当前是 DNS 旁路由，只有 DNS 查询经过本机，代理只能做显式代理
 #   （客户端手动指向），不要开 TUN / 透明代理 / 内置 DNS 抢 :53，
 #   否则会破坏 AGH :53 -> SmartDNS :6053 的链路。
+
+##### 现网在用、但故意仍不编进固件的插件（2026-11-18 实机核对）#####
+# 对照方法：/rom/lib/apk/db/installed（镜像内置 299 个包）与
+# /lib/apk/db/installed（当前 336 个包）做差集 -> 后装 37 个包、其中 kmod 为 0 个。
+# 也就是说：所有 kmod 都在 squashfs 里，后装的都是纯用户态包 —— 内核换代不会
+# 把它们带崩，刷机不加 -n 时 /overlay 原样保留，插件照旧在。
+#
+# 包名                                   当前版本            来源
+# luci-app-passwall / -i18n              26.11.11-r1         后装（passwall 二进制源）
+# luci-app-vantage / luci-theme-vantage  1.0.20              后装（anothadev.github.io 主题源）
+# luci-app-cpufreq (+ i18n)              target 默认带入     镜像内置（ROM 里有）
+# adguardhome / smartdns / luci-app-*    target+本文件       镜像内置
+#
+# 为什么 Passwall 仍不编：
+#   1) 你 2026-11-09 定过"代理应用一律不编"，只编 kmod；
+#   2) 它依赖 haproxy / chinadns-ng / dns2socks / microsocks / geoview /
+#      v2ray-geoip+geosite / lua5.1+5.4 / luci-compat / unzip 共十几个包，
+#      编进去会把 squashfs 明显撑大，而这些包升级频繁，跟着固件走反而更难维护。
+# 为什么 Vantage 仍不编：LibWrt 的 feeds.conf.default 里没有它的源
+#   （只有 nss_packages / sqm_scripts_nss / immortalwrt 的 packages / luci /
+#   routing / telephony / video），要编就得额外挂第三方 feed，不值当。
+#
+# 结论：这两个保持 overlay 方式，刷机后若发现掉了，一条命令补回（见 workflow 的
+# 运行摘要）。真正需要"编进固件"的只有 kmod —— 见下面「附加 kmod」段。
 
 ##### LuCI 中文 / 基础工具（保持与现网一致）#####
 CONFIG_PACKAGE_luci=y
@@ -156,6 +218,13 @@ CONFIG_PACKAGE_kmod-nft-socket=y
 CONFIG_PACKAGE_kmod-nft-nat=y
 CONFIG_PACKAGE_kmod-nft-offload=y
 CONFIG_PACKAGE_kmod-nft-bridge=y
+# 现网已装（Passwall 的 fullcone/natcap 与 NSS 卸载配合时用得上）；
+# 它来自 packages feed，不是 target 默认包，显式钉住避免下一版默认包集变化后丢。
+CONFIG_PACKAGE_kmod-nft-fullcone=y
+
+# -- NSS 侧（现网已装，显式钉住）--
+# kmod-nss-ifb 是 SQM/sq 挂在 NSS 卸载路径上的 ifb 设备支持，来自 nss_packages。
+CONFIG_PACKAGE_kmod-nss-ifb=y
 
 # -- QoS / 队列 / 拥塞控制 --
 CONFIG_PACKAGE_kmod-sched-core=y

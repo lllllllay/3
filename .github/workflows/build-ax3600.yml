@@ -154,6 +154,29 @@ jobs:
           echo "=== 最终编入固件的全部 kmod ==="
           grep -E '^CONFIG_PACKAGE_kmod-.*=y' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
 
+      - name: 断言 1G 内存档位（NSS Memory Profile = HIGH）
+        run: |
+          cd "$GITHUB_WORKSPACE/libwrt"
+          echo "=== NSS 内存档位（nss_packages: qca-nss-drv/Config.in）==="
+          grep -E '^CONFIG_NSS_MEM_PROFILE' .config || true
+          if grep -qx 'CONFIG_NSS_MEM_PROFILE_HIGH=y' .config; then
+            echo "OK   NSS_MEM_PROFILE_HIGH（1G 档）已生效"
+          elif grep -qE '^CONFIG_NSS_MEM_PROFILE_' .config; then
+            echo "::error::NSS 内存档位不是 1G（HIGH）。1G 内存会被当成 512M 板子编，"
+            echo "::error::NSS 缓冲池只按一半内存分配，高并发时更容易丢包。"
+            echo ">>> 检查 config.seed 里 CONFIG_NSS_MEM_PROFILE_HIGH=y 是否被 defconfig 丢弃。"
+            exit 1
+          else
+            echo "::warning::.config 里没有 NSS_MEM_PROFILE 符号："
+            echo "::warning::多半是 nss_packages feed 没装上、或 kmod-qca-nss-drv 未被选中。"
+            echo "::warning::下一步「核对固件 kmod 基线」会检查 kmod-qca-nss-drv，缺了会直接失败。"
+          fi
+          echo "=== 1G 内存怎么生效的（供事后排查）==="
+          echo "CDT(/dev/mtd5) 配 DDR 容量 + bootloader 修正 dtb 的 /memory 节点；"
+          echo "固件源码保留 ipq8074-512m.dtsi 的保留区布局即可，不改 memory reg、不做 1g dtsi。"
+          echo "ath11k 的 qcom,ath11k-fw-memory-mode 保持 <1>（512M 档）：改成 0 需同步把 q6"
+          echo "保留区从 55MB 放大到约 97MB，属高风险改动，本仓库不做。"
+
       - name: 预置 argon 为默认主题
         run: |
           D="$GITHUB_WORKSPACE/libwrt/files/etc/uci-defaults"
@@ -242,7 +265,67 @@ jobs:
             echo "  不通就在 GitHub 地址代理选项切 CDN，或手动上传 clash_meta 到 /etc/openclash/core/）。"
             echo "  apk 源里没有 mihomo 包，内核下载不经过「系统 → 软件包」页面。"
             echo "注意：这是 DNS 旁路由，只能做显式代理，勿开 TUN / 透明代理 / 内置 DNS 抢 :53。"
+            echo ""
+            echo "### 1G 内存（本机硬件已改 1G）"
+            echo "- 编译侧只锁了 NSS Memory Profile = HIGH（1G 档），已由上面的断言步骤把关。"
+            echo "- 内存识别靠 CDT(mtd5) + bootloader 修正 /memory 节点，与固件无关；"
+            echo "  刷完用 \`head -3 /proc/meminfo\` 复核，MemTotal 应约 927000 kB。"
+            echo "- ath11k 固件内存档位没动（仍 512M 档），原因见 config.seed 注释。"
+            echo ""
+            echo "### 已装插件的保留规则（重要）"
+            echo "- 镜像内置：adguardhome / smartdns / luci-app-* / cpufreq / 全部 kmod。"
+            echo "- 后装（在 /overlay，37 个包，其中 kmod 为 0）：luci-app-passwall 及其依赖、"
+            echo "  luci-app-vantage + luci-theme-vantage。"
+            echo "- 因此刷机【不要加 -n / 不要恢复出厂】，sysupgrade 会原样保留 overlay。"
+            echo "- 万一掉了，补装命令："
+            echo "  apk update && apk add luci-app-passwall luci-app-vantage luci-theme-vantage"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 核对固件 kmod 与现网基线（刷机后能力不丢）
+        if: success()
+        run: |
+          B="$GITHUB_WORKSPACE/libwrt/bin/targets/qualcommax/ipq807x"
+          M=$(ls "$B"/*.manifest 2>/dev/null | head -1)
+          [ -n "$M" ] || { echo "::error::没有 manifest，无法核对 kmod"; exit 1; }
+          echo "使用 manifest: $M"
+          # 基线取自实机 apk list --installed（2026-11-18），只列与能力相关的 kmod：
+          # 隧道 / 诊断 / nft 扩展 / QoS / NSS 卸载 / 无线。缺任何一个都会让现网功能退化。
+          BASE='kmod-tun
+          kmod-inet-diag
+          kmod-netlink-diag
+          kmod-unix-diag
+          kmod-packet-diag
+          kmod-nft-tproxy
+          kmod-nft-socket
+          kmod-nft-fullcone
+          kmod-nft-offload
+          kmod-sched-cake
+          kmod-sched-core
+          kmod-tcp-bbr
+          kmod-ifb
+          kmod-nss-ifb
+          kmod-qca-nss-drv
+          kmod-qca-nss-ecm
+          kmod-qca-nss-dp
+          kmod-qca-ssdk
+          kmod-ath11k
+          kmod-ath11k-ahb
+          kmod-mac80211'
+          miss=0
+          for p in $BASE; do
+            if grep -qE "^${p}(-|~)[0-9]" "$M"; then
+              echo "OK   $p"
+            else
+              echo "MISS $p"
+              miss=1
+            fi
+          done
+          if [ "$miss" -ne 0 ]; then
+            echo "::error::上面 MISS 的 kmod 不在固件里。现网这些是内置的，"
+            echo "::error::缺了会影响 Passwall / SQM / NSS 卸载 / WiFi 卸载，刷了会退化。"
+            exit 1
+          fi
+          echo "OK   基线 kmod 全部在固件内"
 
       - name: 上传固件
         if: success()
