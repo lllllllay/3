@@ -250,12 +250,31 @@ jobs:
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
           echo "完整编译日志写入 build.log（V=s 日志可达数百 MB，不直出 Actions 日志）"
+          echo "=== 编译前环境 ==="
+          echo "cores=$(nproc)  mem=$(free -g | awk '/^Mem:/{print $2}')GB"
+          df -h / "$GITHUB_WORKSPACE" | sed 's/^/  /'
+          FREE_G=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          echo "可用磁盘 ${FREE_G}GB（OpenWrt 首次编译约需 22-28GB）"
+          if [ "$FREE_G" -lt 20 ]; then
+            echo "::warning::可用磁盘只有 ${FREE_G}GB，很可能编到一半 ENOSPC 被杀"
+          fi
           set +e
           make -j$(nproc) V=s > "$LOG" 2>&1
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then
-            echo "=== 编译失败 (rc=$rc)，最后 300 行 ==="
+            echo "=== 编译失败 rc=$rc（137=SIGKILL/内存或磁盘；143=SIGTERM/被取消；1=真编译错误）==="
+            echo "=== 失败瞬间资源 ==="
+            df -h / | sed 's/^/  /'
+            free -m | sed 's/^/  /'
+            echo "=== 内核 OOM / 杀进程记录 ==="
+            (dmesg 2>/dev/null || sudo dmesg 2>/dev/null) | grep -iE 'killed process|out of memory|oom-kill' | tail -8 || echo "  (dmesg 无 OOM 记录)"
+            echo "=== build.log 状态 ==="
+            ls -lh "$LOG"; echo "  行数: $(wc -l < "$LOG")"
+            echo "=== 日志最后 5 行（看是否被硬截断）==="
+            tail -n 5 "$LOG" | cut -c1-200
+            echo "=== 若 rc≠1 且日志末尾没有 '*** Error'，说明不是编译错，是进程被外部杀掉（内存/磁盘/取消）==="
+            echo "=== 最后 300 行 ==="
             tail -n 300 "$LOG"
             echo "=== error / fatal 相关行（最后 40 条）==="
             grep -inE '\b(error|fatal|failed)\b' "$LOG" | tail -40 || true
