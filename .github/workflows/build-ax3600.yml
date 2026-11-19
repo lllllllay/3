@@ -152,22 +152,28 @@ jobs:
             if grep -qx "$s" .config; then echo "OK   $s"; else echo "MISS $s"; miss=1; fi
           done
           [ "$miss" -eq 0 ] || { echo "::error::关键包未进入 .config，立即终止"; exit 1; }
-          echo "=== 断言 3：Passwall 只编本体，协议核心不在固件里（用户自己「组件更新」）==="
-          if grep -qx 'CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y' .config; then
-            echo "OK   透明代理走 nftables"
-          else
-            echo "::warning::MISS nftables 透明代理，Passwall 开起来会提示缺组件"
-          fi
+          echo "=== 断言 3：Passwall 只编本体，三个大核心不在固件里（用户自己「组件更新」）==="
+          echo "--- .config 里与 passwall / 核心相关的行（诊断用）---"
+          grep -E 'CONFIG_PACKAGE_(luci-app-passwall|geoview|xray-core|sing-box|hysteria)' .config || echo "(无)"
+          echo "--- 透明代理后端（nftables.sh 是否落位由打包决定，这里只看是否被显式选中）---"
+          grep -E 'CONFIG_PACKAGE_luci-app-passwall_(Nftables|Iptables)_Transparent_Proxy' .config \
+            || echo "(未显式出现；现网镜像 /usr/share/passwall/nftables.sh 已实测存在，不影响功能)"
           for s in CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray \
                    CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox \
                    CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria; do
             if grep -qx "$s=y" .config; then echo "::error::$s 被打开了，会给镜像凭空加核心体积"; exit 1; else echo "OK   $s 未打开"; fi
           done
-          CORE=$(grep -E '^CONFIG_PACKAGE_(xray-core|sing-box|hysteria|geoview)=y' .config || true)
+          # 只硬盯三个大件：xray 29.7MB、sing-box 41.8MB、hysteria 22.2MB。
+          # geoview 不列入硬失败：passwall 的 config 段写的是 `default y if aarch64||arm...`，
+          # 显式 not set 也压不住（现网镜像同样带一份 7.2MB 的 /usr/bin/geoview）。
+          CORE=$(grep -E '^CONFIG_PACKAGE_(xray-core|sing-box|hysteria)=y' .config || true)
           if [ -n "$CORE" ]; then
-            echo "::error::协议核心仍被选中（可能来自 target 默认包集）：$CORE"; exit 1
+            echo "::error::大核心仍被选中（可能来自 target 默认包集）：$CORE"; exit 1
           else
-            echo "OK   镜像不含 xray-core / sing-box / hysteria / geoview"
+            echo "OK   镜像不含 xray-core / sing-box / hysteria"
+          fi
+          if grep -qx 'CONFIG_PACKAGE_geoview=y' .config; then
+            echo "NOTE geoview=y —— passwall 在 aarch64 上的默认项（7.2MB，现网同款），不拦"
           fi
           echo "=== 断言 4：不应再出现第二套代理前端（Passwall 已定稿，其余不编）==="
           # luci-app-passwall / xray-core / sing-box / luci-compat / unzip 已由我们的

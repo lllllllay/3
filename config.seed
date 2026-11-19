@@ -158,10 +158,13 @@ CONFIG_PACKAGE_luci-i18n-vantage-zh-cn=y
 #
 # 子选项（2026-11-19 收敛为「只编本体」：核心全部不编，体积让给别的用途）：
 #   透明代理  Nftables=y  Iptables=n        （本固件 firewall4 + nftables）
-#   协议核心  全部 = n                      （xray / sing-box / hysteria / geoview 都不编，
+#   协议核心  全部 = n                      （xray / sing-box / hysteria 都不编，
 #                                          光是 xray 29.7MB + sing-box 41.8MB 就吃掉镜像一半。
 #                                          用户自己在 LuCI → Passwall「组件更新」里装/更新，
 #                                          装到 /usr/bin 后由 overlay 承载）
+#             Geoview 例外：passwall 的 config 段是 `default y if aarch64||arm...`，
+#                          显式 not set 也压不住，会固定带一份 7.2MB 的 /usr/bin/geoview
+#                          （现网镜像同款），属于可接受的固定成本。
 #   辅助      SmartDNS=y（镜像本就带同一份 smartdns，是 AGH 之后 :6053 的解析链路，
 #                        这个开关只是让插件认得出它，不额外增加体积）
 #             Simple-Obfs=n / Haproxy=n（基础功能用不到）
