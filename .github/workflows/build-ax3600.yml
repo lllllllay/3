@@ -152,13 +152,23 @@ jobs:
             if grep -qx "$s" .config; then echo "OK   $s"; else echo "MISS $s"; miss=1; fi
           done
           [ "$miss" -eq 0 ] || { echo "::error::关键包未进入 .config，立即终止"; exit 1; }
-          echo "=== 断言 3：Passwall 的核心与子选项（决定了刷完后能跑哪些协议）==="
-          for s in CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y \
-                   CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y \
-                   CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y \
-                   CONFIG_PACKAGE_xray-core=y CONFIG_PACKAGE_sing-box=y; do
-            if grep -qx "$s" .config; then echo "OK   $s"; else echo "::warning::MISS $s（若持续缺失，Passwall 打开后对应协议不可用）"; fi
+          echo "=== 断言 3：Passwall 只编本体，协议核心不在固件里（用户自己「组件更新」）==="
+          if grep -qx 'CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y' .config; then
+            echo "OK   透明代理走 nftables"
+          else
+            echo "::warning::MISS nftables 透明代理，Passwall 开起来会提示缺组件"
+          fi
+          for s in CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray \
+                   CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox \
+                   CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria; do
+            if grep -qx "$s=y" .config; then echo "::error::$s 被打开了，会给镜像凭空加核心体积"; exit 1; else echo "OK   $s 未打开"; fi
           done
+          CORE=$(grep -E '^CONFIG_PACKAGE_(xray-core|sing-box|hysteria|geoview)=y' .config || true)
+          if [ -n "$CORE" ]; then
+            echo "::error::协议核心仍被选中（可能来自 target 默认包集）：$CORE"; exit 1
+          else
+            echo "OK   镜像不含 xray-core / sing-box / hysteria / geoview"
+          fi
           echo "=== 断言 4：不应再出现第二套代理前端（Passwall 已定稿，其余不编）==="
           # luci-app-passwall / xray-core / sing-box / luci-compat / unzip 已由我们的
           # 「Passwall」段主动选中，这里只盯"别的代理前端"和 ruby（会白吃体积）。
@@ -234,35 +244,8 @@ jobs:
             echo "::warning::如出现该情况，在 LuCI「系统 → 语言与界面」里手动切到 Vantage 即可"
           fi
 
-      # 5G 频繁把客户端踢下线（hostapd 报 excessive missing ACKs）：
-      # ath11k 在 NSS WiFi 卸载下会向 hostapd 发 PEER_STA_KICKOUT，被当成低 ACK 处理，
-      # 关掉 5G 的 disassoc_low_ack 即可规避。2.4G 保持默认（该网段是 IoT 设备，踢人反而是保护）。
-      # 执行时机有保证：/etc/init.d/boot 里先 `/sbin/wifi config` 生成 /etc/config/wireless，
-      # 再跑 /etc/uci-defaults/*，所以这里 wireless 一定已存在，不会写出残缺配置。
-      - name: 预置 5G 关闭「低 ACK 踢人」（disassoc_low_ack=0）
-        run: |
-          D="$GITHUB_WORKSPACE/libwrt/files/etc/uci-defaults"
-          F="$D/99-ax3600-5g-lowack"
-          mkdir -p "$D"
-          printf '%s\n' \
-            '#!/bin/sh' \
-            '# AX3600 (ath11k + NSS offload): 5G 关闭「低 ACK 即踢人」' \
-            '# 现象：iPhone 等设备反复 断-连，hostapd 日志 disconnected due to excessive missing ACKs' \
-            '[ -f /etc/config/wireless ] || exit 0' \
-            'for s in $(uci -q show wireless | grep =wifi-iface | cut -d. -f2 | cut -d= -f1); do' \
-            '    dev=$(uci -q get "wireless.$s.device")' \
-            '    band=$(uci -q get "wireless.$dev.band")' \
-            '    [ "$band" = "5g" ] || continue' \
-            '    uci -q set "wireless.$s.disassoc_low_ack=0"' \
-            'done' \
-            'uci -q commit wireless' \
-            'exit 0' > "$F"
-          chmod +x "$F"
-          echo "=== 写入的 uci-defaults $F ==="
-          cat "$F"
-          echo "=== 语法检查 ==="
-          sh -n "$F" && echo "OK   sh -n 通过"
-
+      # 5G 的 disassoc_low_ack 按 OpenWrt 默认（=1）交给驱动判断，不再用 uci-defaults 改。
+      # 2026-11-19 用户决定：低 ACK 踢人保持默认行为，固件里不预置任何 wireless 覆盖。
       - name: 预下载源码包
         working-directory: libwrt
         run: make download -j8
@@ -335,11 +318,11 @@ jobs:
           echo "=== manifest 复核：关键 kmod / WireGuard / 是否混入代理应用 ==="
           grep -iE 'kmod-(tun|inet-diag|netlink-diag|nft-tproxy|nft-socket)|wireguard|openclash|homeproxy|sing-box|ruby' "$B"/*.manifest \
             || echo '(manifest 无匹配，请回看上方 MISS 报告)'
-          echo "=== 固件应不含代理 LuCI / 内核 ==="
-          if grep -iE '^(luci-app-(openclash|homeproxy|nikki|passwall)|sing-box|mihomo|xray-core|ruby) ' "$B"/*.manifest; then
-            echo "::warning::固件里出现了代理应用，请检查 target 默认包集"
+          echo "=== 固件里应只有 Passwall 本体，无第二套代理前端、无协议核心大件 ==="
+          if grep -iE '^(luci-app-(openclash|homeproxy|nikki)|mihomo|ruby|ruby-yaml|xray-core|sing-box|hysteria|geoview) ' "$B"/*.manifest; then
+            echo "::warning::固件里出现了第二套代理前端或协议核心，请检查 target 默认包集"
           else
-            echo "OK   固件干净，代理应用全部留给刷机后安装"
+            echo "OK   只有 luci-app-passwall + 它的轻量依赖，核心留给「组件更新」"
           fi
           FW=$(find "$B" -maxdepth 1 -type f \
             -name '*xiaomi_ax3600-stock*squashfs-sysupgrade*.bin' -print -quit)
@@ -352,13 +335,15 @@ jobs:
           cp "$B"/*.manifest "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
           ls -lh "$GITHUB_WORKSPACE/out/"
           {
-            echo "### 代理（Passwall 已编进固件）"
+            echo "### 代理（只编 Passwall 本体，核心自己更新）"
             echo "- 本镜像内置：luci-app-passwall 26.11.11 + luci-i18n-passwall-zh-cn，"
-            echo "  以及 xray-core、sing-box（含 with_quic，VLESS(Reality) 与 Hysteria2 都能跑）、"
-            echo "  chinadns-ng / dns2socks / microsocks / tcping / ipt2socks / dnsmasq-full。"
+            echo "  及其硬依赖 chinadns-ng / dns2socks / microsocks / tcping / ipt2socks / dnsmasq-full。"
+            echo "- 协议核心（xray / sing-box / hysteria / geoview）【不编】：体积太大，"
+            echo "  刷完进 Passwall「组件更新」→ 检查更新，自己装/更新到 /usr/bin。"
             echo "- 透明代理按 nftables(fw4) 编译，Iptables 侧未编。"
-            echo "- Geo 数据没编（省 20MB）：刷完进 Passwall「规则管理」点一次更新即可。"
-            echo "- 现有 51 个节点配置在 /etc/config/passwall，sysupgrade 会保留，刷完直接可用。"
+            echo "- Geo 数据没编：进「规则管理」点一次更新即可。"
+            echo "- 现有 51 个节点配置在 /etc/config/passwall，sysupgrade 会保留；"
+            echo "  但核心目录若被覆盖，刷完要先点一次「组件更新」才有可用核心。"
             echo "- 这是 DNS 旁路由：勿开 TUN / 全局透明代理 / 内置 DNS 抢 :53，"
             echo "  会打断 AGH :53 -> SmartDNS :6053 的链路。"
             echo ""
@@ -368,13 +353,9 @@ jobs:
             echo "  刷完用 \`head -3 /proc/meminfo\` 复核，MemTotal 应约 927000 kB。"
             echo "- ath11k 固件内存档位没动（仍 512M 档），原因见 config.seed 注释。"
             echo ""
-            echo "### 5G 频繁踢客户端（本次已修）"
-            echo "- 现象：设备反复 断-连，hostapd 报 disconnected due to excessive missing ACKs。"
-            echo "- 原因：nss_offload=1 时 ath11k 固件发 PEER_STA_KICKOUT，被 hostapd 当成低 ACK。"
-            echo "- 修复：镜像内置 /etc/uci-defaults/99-ax3600-5g-lowack，首次启动给所有 5g 频段"
-            echo "  的 wifi-iface 写 disassoc_low_ack=0（2.4G 不动）。"
-            echo "- 刷完自查：\`uci get wireless.default_radio1.disassoc_low_ack\` 应为 0；"
-            echo "  若已是旧 overlay（脚本已跑过就不再执行），手动补："
+            echo "### 5G 低 ACK 踢人：保持默认"
+            echo "- 不再内置 uci-defaults 覆盖，disassoc_low_ack 走 OpenWrt 默认值。"
+            echo "- 若以后又出现设备反复断-连（hostapd 报 excessive missing ACKs），手动补："
             echo "  uci set wireless.default_radio1.disassoc_low_ack=0 && uci commit wireless && wifi reload"
             echo ""
             echo "### 刷机后还会保留什么、会丢什么"
